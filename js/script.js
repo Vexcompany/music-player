@@ -1,603 +1,355 @@
-/**
- * Main script for Music Player
- * Dibuat lebih direct & robust untuk mengurangi error
- */
+import { API_CONFIG, APP_DEFAULTS } from './config.js';
 
-// DOM Elements
-const searchInput = document.querySelector('.search-input');
-const searchBtn = document.querySelector('.search-btn');
-const resultsContainer = document.getElementById('results');
-const resultsSection = document.getElementById('resultsSection');
-const searchResultTitle = document.getElementById('searchResultTitle');
-const loadingElement = document.querySelector('.loading');
-const noResultsElement = document.querySelector('.no-results');
-const audioPlayer = document.getElementById('audioPlayer');
-const welcomePanel = document.getElementById('welcomePanel');
-const welcomeCloseBtn = document.getElementById('welcomeCloseBtn');
-const logoLink = document.getElementById('logoLink');
-const historySection = document.getElementById('historySection');
-const historyList = document.getElementById('historyList');
-
-// Player elements
-const playerMini = document.getElementById('playerMini');
-const playerFull = document.getElementById('playerFull');
-const minimizeBtn = document.getElementById('minimizeBtn');
-
-// Mini player elements
-const miniThumbnail = document.getElementById('miniThumbnail');
-const miniTitle = document.getElementById('miniTitle');
-const miniArtist = document.getElementById('miniArtist');
-const miniPlayBtn = document.getElementById('miniPlayBtn');
-const miniNextBtn = document.getElementById('miniNextBtn');
-
-// Full player elements
-const fullThumbnail = document.getElementById('fullThumbnail');
-const fullTitle = document.getElementById('fullTitle');
-const fullArtist = document.getElementById('fullArtist');
-const playBtnLarge = document.getElementById('playBtnLarge');
-const prevBtnLarge = document.getElementById('prevBtnLarge');
-const nextBtnLarge = document.getElementById('nextBtnLarge');
-const shuffleBtn = document.getElementById('shuffleBtn');
-const repeatBtn = document.getElementById('repeatBtn');
-const progressBarLarge = document.getElementById('progressBarLarge');
-const progressLarge = document.getElementById('progressLarge');
-const currentTimeLarge = document.getElementById('currentTimeLarge');
-const totalTimeLarge = document.getElementById('totalTimeLarge');
-const downloadBtnLarge = document.getElementById('downloadBtnLarge');
-const queueList = document.getElementById('queueList');
-
-// App State
-let currentPlaylist = [];
-let currentSongIndex = 0;
-let isPlaying = false;
-let isShuffle = false;
-let isRepeat = false;
-let recentlyPlayed = [];
-
-/**
- * Shows welcome panel with animation
- */
-function showWelcomePanel() {
-    setTimeout(() => {
-        welcomePanel.classList.add('show');
-    }, 100);
-}
-
-/**
- * Searches for songs using the API
- * @param {string} query - Search query
- */
-async function searchSongs(query) {
-    // Show loading indicator
-    loadingElement.style.display = 'flex';
-    resultsContainer.innerHTML = '';
-    noResultsElement.style.display = 'none';
-    
-    // Update UI to show results section
-    historySection.style.display = 'none';
-    resultsSection.classList.add('active');
-    searchResultTitle.textContent = `Hasil Pencarian: "${query}"`;
-    
-    try {
-        // Fetch data from the API
-        const response = await fetch(`${API_URL.SEARCH}?query=${encodeURIComponent(query)}`);
-        const data = await response.json();
+class SoundCloudPlayer {
+    constructor() {
+        this.currentTrack = null;
+        this.playlist = [];
+        this.recentTracks = JSON.parse(localStorage.getItem(APP_DEFAULTS.STORAGE_KEY)) || [];
+        this.isPlaying = false;
+        this.audioPlayer = new Audio();
+        this.widget = null;
         
-        // Hide loading indicator
-        loadingElement.style.display = 'none';
+        this.init();
+    }
+    
+    init() {
+        this.setupEventListeners();
+        this.loadRecentTracks();
+        this.setupAudioEvents();
+    }
+    
+    setupEventListeners() {
+        document.getElementById('resolveBtn').addEventListener('click', () => {
+            const url = document.getElementById('scUrlInput').value.trim();
+            if (url) this.resolveUrl(url);
+        });
         
-        // Check if we have valid results
-        if (!data.status || !data.data || data.data.length === 0) {
-            noResultsElement.style.display = 'block';
+        document.getElementById('searchBtn').addEventListener('click', () => {
+            const query = document.getElementById('searchInput').value.trim();
+            if (query) this.searchTracks(query);
+        });
+        
+        document.getElementById('scUrlInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                const url = e.target.value.trim();
+                if (url) this.resolveUrl(url);
+            }
+        });
+        
+        document.getElementById('searchInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                const query = e.target.value.trim();
+                if (query) this.searchTracks(query);
+            }
+        });
+        
+        document.getElementById('playPauseBtn').addEventListener('click', () => this.togglePlay());
+        document.getElementById('prevBtn').addEventListener('click', () => this.playPrevious());
+        document.getElementById('nextBtn').addEventListener('click', () => this.playNext());
+        document.getElementById('downloadBtn').addEventListener('click', () => this.downloadCurrent());
+    }
+    
+    setupAudioEvents() {
+        this.audioPlayer.addEventListener('ended', () => this.playNext());
+        this.audioPlayer.addEventListener('timeupdate', () => this.updateProgress());
+        this.audioPlayer.addEventListener('loadedmetadata', () => this.updateDuration());
+    }
+    
+    async resolveUrl(url) {
+        this.showLoading(true);
+        
+        try {
+            const response = await fetch(`${API_CONFIG.LOCAL.BASE_URL}${API_CONFIG.LOCAL.RESOLVE}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url })
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                this.playlist = data.tracks;
+                this.displayResults(data.tracks);
+                this.showToast(`Found ${data.count} tracks`);
+            } else {
+                throw new Error(data.error || 'Failed to resolve URL');
+            }
+        } catch (error) {
+            console.error('Resolve error:', error);
+            this.showError('Failed to fetch tracks. Make sure the URL is public.');
+            
+            this.tryWidgetEmbed(url);
+        } finally {
+            this.showLoading(false);
+        }
+    }
+    
+    async searchTracks(query) {
+        this.showLoading(true);
+        
+        try {
+            const response = await fetch(
+                `${API_CONFIG.LOCAL.BASE_URL}${API_CONFIG.LOCAL.SEARCH}?q=${encodeURIComponent(query)}`
+            );
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                this.playlist = data.tracks;
+                this.displayResults(data.tracks, true); 
+            } else {
+                throw new Error(data.error);
+            }
+        } catch (error) {
+            console.error('Search error:', error);
+            this.showError('Search failed. Please try again.');
+        } finally {
+            this.showLoading(false);
+        }
+    }
+    
+    displayResults(tracks, useWidget = false) {
+        const container = document.getElementById('searchResults');
+        container.innerHTML = '';
+        
+        tracks.forEach((track, index) => {
+            const card = document.createElement('div');
+            card.className = 'track-card';
+            card.innerHTML = `
+                <div class="track-image">
+                    <img src="${track.image}" alt="${track.title}" loading="lazy">
+                    <button class="play-overlay" onclick="player.playTrack(${index}, ${useWidget})">
+                        <i class="fas fa-play"></i>
+                    </button>
+                </div>
+                <div class="track-info">
+                    <h3 class="track-title">${this.escapeHtml(track.title)}</h3>
+                    <p class="track-artist">${this.escapeHtml(track.artist)}</p>
+                    ${track.durationText ? `<span class="track-duration">${track.durationText}</span>` : ''}
+                    ${track.likes ? `<span class="track-likes"><i class="fas fa-heart"></i> ${track.likes}</span>` : ''}
+                </div>
+                <div class="track-actions">
+                    <button onclick="player.addToQueue(${index})" title="Add to Queue">
+                        <i class="fas fa-plus"></i>
+                    </button>
+                    <button onclick="player.downloadTrack(${index})" title="Download">
+                        <i class="fas fa-download"></i>
+                    </button>
+                </div>
+            `;
+            container.appendChild(card);
+        });
+    }
+    
+    async playTrack(index, useWidget = false) {
+        const track = this.playlist[index];
+        if (!track) return;
+        
+        this.currentTrack = { ...track, index };
+        
+        if (useWidget && track.permalink) {
+            this.loadWidget(track.permalink);
+        } else if (track.downloadUrl) {
+            this.loadAudio(track.downloadUrl);
+        } else {
+            this.loadWidget(track.sourceUrl || track.permalink);
+        }
+        
+        this.updatePlayerUI(track);
+        this.addToRecent(track);
+        this.isPlaying = true;
+        this.updatePlayButton();
+    }
+    
+    loadAudio(url) {
+        document.getElementById('widgetContainer').innerHTML = '';
+        
+        this.audioPlayer.src = url;
+        this.audioPlayer.play().catch(err => {
+            console.error('Audio play error:', err);
+            this.showError('Cannot play this track directly. Try using SoundCloud app.');
+        });
+    }
+    
+    loadWidget(permalink) {
+        const container = document.getElementById('widgetContainer');
+        const encodedUrl = encodeURIComponent(permalink);
+        
+        container.innerHTML = `
+            <iframe 
+                width="100%" 
+                height="166" 
+                scrolling="no" 
+                frameborder="no" 
+                allow="autoplay" 
+                src="https://w.soundcloud.com/player/?url=${encodedUrl}&color=ff5500&auto_play=true&hide_related=true&show_comments=false&show_user=true&show_reposts=false&show_teaser=false">
+            </iframe>
+        `;
+        
+        this.audioPlayer.pause();
+    }
+    
+    downloadTrack(index) {
+        const track = this.playlist[index];
+        if (!track || !track.downloadUrl) {
+            this.showError('Download not available for this track');
             return;
         }
         
-        // Format and update playlist
-        currentPlaylist = UTILS.formatSearchResults(data.data);
+        const a = document.createElement('a');
+        a.href = track.downloadUrl;
+        a.download = `${track.title}.mp3`;
+        a.target = '_blank';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
         
-        // Display results
-        displayResults(currentPlaylist);
-    } catch (error) {
-        console.error('Error fetching search results:', error);
-        loadingElement.style.display = 'none';
-        noResultsElement.style.display = 'block';
+        this.showToast('Download started...');
     }
-}
-
-/**
- * Displays search results in the UI
- * @param {Array} songs - Array of song objects
- */
-function displayResults(songs) {
-    resultsContainer.innerHTML = '';
     
-    songs.forEach(song => {
-        const songCard = document.createElement('div');
-        songCard.className = 'song-card';
-        songCard.dataset.songId = song.id;
-        
-        // Check if title is too long and needs scrolling
-        const needsScrolling = UTILS.needsScrolling(song.title);
-        
-        songCard.innerHTML = `
-            <img src="${song.thumbnail}" alt="${song.title}" class="song-thumbnail">
-            <div class="song-info">
-                <div class="${needsScrolling ? 'scrolling-text' : 'song-title'}">
-                    ${needsScrolling ? `<div class="scrolling-text-content">${song.title}</div>` : song.title}
-                </div>
-                <div class="song-artist">${song.artist}</div>
-                <div class="song-duration">${song.timestamp || '0:00'}</div>
-            </div>
-        `;
-        
-        songCard.addEventListener('click', () => {
-            const index = currentPlaylist.findIndex(s => s.id === song.id);
-            playSong(index);
-            updateQueue();
-        });
-        
-        resultsContainer.appendChild(songCard);
-    });
-}
-
-/**
- * Plays a song from the current playlist
- * @param {number} index - Index of the song in the playlist
- */
-async function playSong(index) {
-    if (index < 0 || index >= currentPlaylist.length) return;
+    downloadCurrent() {
+        if (this.currentTrack) {
+            this.downloadTrack(this.currentTrack.index);
+        }
+    }
     
-    currentSongIndex = index;
-    const song = currentPlaylist[index];
+    addToQueue(index) {
+        const track = this.playlist[index];
+        this.showToast('Added to queue');
+    }
     
-    // Show loading
-    loadingElement.style.display = 'flex';
-    
-    try {
-        // Direct API call to get MP3
-        const response = await fetch(`${API_URL.DOWNLOAD_MP3}?url=${encodeURIComponent(song.videoUrl)}`);
-        const data = await response.json();
+    togglePlay() {
+        if (!this.currentTrack) return;
         
-        // Direct access to download URL
-        const downloadUrl = data && data.data && data.data.dl ? data.data.dl : null;
-        
-        if (!downloadUrl) {
-            throw new Error('Failed to get audio URL');
+        if (document.getElementById('widgetContainer').innerHTML) {
+            this.showToast('Use SoundCloud widget controls');
+            return;
         }
         
-        // Update mini player UI
-        miniThumbnail.src = song.thumbnail;
-        
-        // Check if title is too long for mini player
-        if (UTILS.needsScrolling(song.title)) {
-            miniTitle.className = 'scrolling-text';
-            miniTitle.innerHTML = `<div class="scrolling-text-content">${song.title}</div>`;
+        if (this.isPlaying) {
+            this.audioPlayer.pause();
         } else {
-            miniTitle.className = 'song-title';
-            miniTitle.textContent = song.title;
+            this.audioPlayer.play();
         }
+        this.isPlaying = !this.isPlaying;
+        this.updatePlayButton();
+    }
+    
+    playNext() {
+        if (!this.currentTrack || this.playlist.length === 0) return;
         
-        miniArtist.textContent = song.artist;
+        const nextIndex = (this.currentTrack.index + 1) % this.playlist.length;
+        this.playTrack(nextIndex);
+    }
+    
+    playPrevious() {
+        if (!this.currentTrack || this.playlist.length === 0) return;
         
-        // Update full player UI
-        fullThumbnail.src = song.thumbnail;
-        
-        // Check if title is too long for full player
-        if (UTILS.needsScrolling(song.title, 30)) {
-            fullTitle.className = 'now-title-large scrolling-text';
-            fullTitle.innerHTML = `<div class="scrolling-text-content">${song.title}</div>`;
-        } else {
-            fullTitle.className = 'now-title-large';
-            fullTitle.textContent = song.title;
+        const prevIndex = this.currentTrack.index === 0 
+            ? this.playlist.length - 1 
+            : this.currentTrack.index - 1;
+        this.playTrack(prevIndex);
+    }
+    
+    updatePlayerUI(track) {
+        document.getElementById('currentTitle').textContent = track.title;
+        document.getElementById('currentArtist').textContent = track.artist;
+        document.getElementById('currentImage').src = track.image;
+        document.getElementById('playerContainer').classList.add('active');
+    }
+    
+    updatePlayButton() {
+        const btn = document.getElementById('playPauseBtn');
+        btn.innerHTML = this.isPlaying 
+            ? '<i class="fas fa-pause"></i>' 
+            : '<i class="fas fa-play"></i>';
+    }
+    
+    updateProgress() {
+        const progress = (this.audioPlayer.currentTime / this.audioPlayer.duration) * 100;
+        document.getElementById('progressBar').style.width = `${progress}%`;
+        document.getElementById('currentTime').textContent = this.formatTime(this.audioPlayer.currentTime);
+    }
+    
+    updateDuration() {
+        document.getElementById('totalTime').textContent = this.formatTime(this.audioPlayer.duration);
+    }
+    
+    addToRecent(track) {
+        this.recentTracks = this.recentTracks.filter(t => t.id !== track.id);
+        this.recentTracks.unshift(track);
+        if (this.recentTracks.length > APP_DEFAULTS.MAX_RECENT_ITEMS) {
+            this.recentTracks.pop();
         }
-        
-        fullArtist.textContent = song.artist;
-        
-        // Update play/pause icons
-        const playIcon = isPlaying ? 'fa-pause' : 'fa-play';
-        miniPlayBtn.innerHTML = `<i class="fas ${playIcon}"></i>`;
-        playBtnLarge.innerHTML = `<i class="fas ${playIcon}"></i>`;
-        
-        // Set audio source and play
-        audioPlayer.src = downloadUrl;
-        audioPlayer.play()
-            .then(() => {
-                isPlaying = true;
-                miniPlayBtn.innerHTML = '<i class="fas fa-pause"></i>';
-                playBtnLarge.innerHTML = '<i class="fas fa-pause"></i>';
-                playerMini.classList.remove('hidden');
-                
-                // Add to recently played
-                addToRecentlyPlayed(song);
-            })
-            .catch(error => {
-                console.error('Error playing audio:', error);
-            });
-    } catch (error) {
-        console.error('Error getting audio URL:', error);
-        alert('Failed to play this song. Please try another one.');
-    } finally {
-        loadingElement.style.display = 'none';
-    }
-}
-
-/**
- * Adds a song to the recently played list
- * @param {Object} song - Song object to add
- */
-function addToRecentlyPlayed(song) {
-    // Remove song if already in the list
-    recentlyPlayed = recentlyPlayed.filter(s => s.id !== song.id);
-    
-    // Add to beginning of list
-    recentlyPlayed.unshift(song);
-    
-    // Keep only the specified maximum number of songs
-    if (recentlyPlayed.length > APP_DEFAULTS.MAX_RECENT_ITEMS) {
-        recentlyPlayed = recentlyPlayed.slice(0, APP_DEFAULTS.MAX_RECENT_ITEMS);
+        localStorage.setItem(APP_DEFAULTS.STORAGE_KEY, JSON.stringify(this.recentTracks));
+        this.loadRecentTracks();
     }
     
-    // Update the UI
-    updateRecentlyPlayed();
-    
-    // Save to local storage
-    localStorage.setItem(APP_DEFAULTS.STORAGE_KEY, JSON.stringify(recentlyPlayed));
-}
-
-/**
- * Updates the recently played list in the UI
- */
-function updateRecentlyPlayed() {
-    if (recentlyPlayed.length === 0) {
-        historyList.innerHTML = `
-            <div class="no-history">
-                <p>Belum ada lagu yang diputar</p>
-            </div>
-        `;
-        return;
-    }
-    
-    historyList.innerHTML = '';
-    
-    recentlyPlayed.forEach(song => {
-        const historyItem = document.createElement('div');
-        historyItem.className = 'history-item';
+    loadRecentTracks() {
+        const container = document.getElementById('recentTracks');
+        container.innerHTML = '';
         
-        // Check if title is too long
-        const needsScrolling = UTILS.needsScrolling(song.title, 25);
-        
-        historyItem.innerHTML = `
-            <img src="${song.thumbnail}" alt="${song.title}" class="history-thumbnail">
-            <div class="history-info">
-                <div class="${needsScrolling ? 'history-title scrolling-text' : 'history-title'}">
-                    ${needsScrolling ? `<div class="scrolling-text-content">${song.title}</div>` : song.title}
+        this.recentTracks.forEach((track, index) => {
+            const item = document.createElement('div');
+            item.className = 'recent-item';
+            item.innerHTML = `
+                <img src="${track.image}" alt="${track.title}">
+                <div class="recent-info">
+                    <div class="recent-title">${this.escapeHtml(track.title)}</div>
+                    <div class="recent-artist">${this.escapeHtml(track.artist)}</div>
                 </div>
-                <div class="history-artist">${song.artist}</div>
-            </div>
-            <div class="history-duration">${song.timestamp || '0:00'}</div>
-        `;
-        
-        historyItem.addEventListener('click', () => {
-            // Add the song to current playlist if not already there
-            if (!currentPlaylist.some(s => s.id === song.id)) {
-                currentPlaylist.unshift(song);
-            }
-            
-            const index = currentPlaylist.findIndex(s => s.id === song.id);
-            playSong(index);
-            updateQueue();
-        });
-        
-        historyList.appendChild(historyItem);
-    });
-}
-
-/**
- * Updates the queue list in the player
- */
-function updateQueue() {
-    queueList.innerHTML = '';
-    
-    // Show next songs in the queue up to the configured maximum
-    for (let i = 0; i < APP_DEFAULTS.MAX_QUEUE_ITEMS; i++) {
-        const nextIndex = (currentSongIndex + i + 1) % currentPlaylist.length;
-        if (nextIndex !== currentSongIndex) { // Don't show current song in the queue
-            const song = currentPlaylist[nextIndex];
-            
-            const queueItem = document.createElement('div');
-            queueItem.className = 'queue-item';
-            
-            // Check if title is too long
-            const needsScrolling = UTILS.needsScrolling(song.title);
-            
-            queueItem.innerHTML = `
-                <img src="${song.thumbnail}" alt="${song.title}" class="queue-thumbnail">
-                <div class="queue-info">
-                    <div class="${needsScrolling ? 'queue-title scrolling-text' : 'queue-title'}">
-                        ${needsScrolling ? `<div class="scrolling-text-content">${song.title}</div>` : song.title}
-                    </div>
-                    <div class="queue-artist">${song.artist}</div>
-                </div>
-                <div class="queue-duration">${song.timestamp || '0:00'}</div>
+                <button onclick="player.playFromRecent(${index})">
+                    <i class="fas fa-play"></i>
+                </button>
             `;
-            
-            queueItem.addEventListener('click', () => {
-                playSong(nextIndex);
-                updateQueue();
-            });
-            
-            queueList.appendChild(queueItem);
-        }
-    }
-    
-    // If there are no next songs, show message
-    if (queueList.children.length === 0) {
-        queueList.innerHTML = `
-            <div class="no-results">
-                <p>Tidak ada lagu berikutnya dalam antrean</p>
-            </div>
-        `;
-    }
-}
-
-/**
- * Toggles play/pause
- */
-function togglePlay() {
-    if (audioPlayer.paused) {
-        audioPlayer.play();
-        isPlaying = true;
-        miniPlayBtn.innerHTML = '<i class="fas fa-pause"></i>';
-        playBtnLarge.innerHTML = '<i class="fas fa-pause"></i>';
-    } else {
-        audioPlayer.pause();
-        isPlaying = false;
-        miniPlayBtn.innerHTML = '<i class="fas fa-play"></i>';
-        playBtnLarge.innerHTML = '<i class="fas fa-play"></i>';
-    }
-}
-
-/**
- * Plays the next song in the playlist
- */
-function playNextSong() {
-    if (isShuffle) {
-        // Play random song from playlist excluding the current one
-        let nextIndex;
-        do {
-            nextIndex = Math.floor(Math.random() * currentPlaylist.length);
-        } while (nextIndex === currentSongIndex && currentPlaylist.length > 1);
-        
-        playSong(nextIndex);
-    } else {
-        playSong((currentSongIndex + 1) % currentPlaylist.length);
-    }
-    updateQueue();
-}
-
-/**
- * Plays the previous song in the playlist
- */
-function playPreviousSong() {
-    playSong((currentSongIndex - 1 + currentPlaylist.length) % currentPlaylist.length);
-    updateQueue();
-}
-
-/**
- * Updates the progress bar based on audio playback
- */
-function updateProgressBar() {
-    const currentTime = audioPlayer.currentTime;
-    const duration = audioPlayer.duration || 1;
-    const progressPercent = (currentTime / duration) * 100;
-    
-    progressLarge.style.width = `${progressPercent}%`;
-    currentTimeLarge.textContent = UTILS.formatTime(currentTime);
-    totalTimeLarge.textContent = UTILS.formatTime(duration);
-}
-
-/**
- * Sets the progress when clicking on the progress bar
- * @param {Event} e - Click event
- */
-function setProgress(e) {
-    // Get the bounding rectangle of the progress bar
-    const rect = progressBarLarge.getBoundingClientRect();
-    // Calculate the click position relative to the progress bar
-    const clickPosition = e.clientX - rect.left;
-    // Calculate the percentage of the click position relative to the width of the progress bar
-    const percentage = clickPosition / rect.width;
-    // Set the audio player's current time based on the percentage of the duration
-    audioPlayer.currentTime = percentage * audioPlayer.duration;
-}
-
-/**
- * Toggles shuffle mode
- */
-function toggleShuffle() {
-    isShuffle = !isShuffle;
-    if (isShuffle) {
-        shuffleBtn.style.color = 'var(--primary)';
-    } else {
-        shuffleBtn.style.color = 'var(--light)';
-    }
-}
-
-/**
- * Toggles repeat mode
- */
-function toggleRepeat() {
-    isRepeat = !isRepeat;
-    if (isRepeat) {
-        repeatBtn.style.color = 'var(--primary)';
-    } else {
-        repeatBtn.style.color = 'var(--light)';
-    }
-}
-
-/**
- * Downloads the current song as MP3
- */
-function downloadCurrentSong() {
-    if (currentPlaylist.length === 0 || currentSongIndex < 0) return;
-    
-    const song = currentPlaylist[currentSongIndex];
-    
-    // Show loading
-    loadingElement.style.display = 'flex';
-    
-    // Direct download approach
-    fetch(`${API_URL.DOWNLOAD_MP3}?url=${encodeURIComponent(song.videoUrl)}`)
-        .then(response => response.json())
-        .then(data => {
-            loadingElement.style.display = 'none';
-            
-            const downloadUrl = data && data.data && data.data.dl ? data.data.dl : null;
-            if (downloadUrl) {
-                window.open(downloadUrl, '_blank');
-            } else {
-                alert('Failed to get download link. Please try again.');
-            }
-        })
-        .catch(error => {
-            loadingElement.style.display = 'none';
-            console.error('Error getting MP3 download URL:', error);
-            alert('Failed to download. Please try again later.');
+            container.appendChild(item);
         });
-}
-
-/**
- * Loads recently played songs from local storage
- */
-function loadRecentlyPlayed() {
-    const storedRecent = localStorage.getItem(APP_DEFAULTS.STORAGE_KEY);
-    if (storedRecent) {
-        try {
-            recentlyPlayed = JSON.parse(storedRecent);
-            updateRecentlyPlayed();
-        } catch (e) {
-            console.error('Error parsing stored recently played:', e);
-        }
+    }
+    
+    playFromRecent(index) {
+        const track = this.recentTracks[index];
+        this.playlist = [track];
+        this.playTrack(0);
+    }
+    
+    showLoading(show) {
+        document.getElementById('loading').style.display = show ? 'flex' : 'none';
+    }
+    
+    showError(message) {
+        const toast = document.getElementById('toast');
+        toast.textContent = message;
+        toast.className = 'toast error';
+        toast.style.display = 'block';
+        setTimeout(() => toast.style.display = 'none', 3000);
+    }
+    
+    showToast(message) {
+        const toast = document.getElementById('toast');
+        toast.textContent = message;
+        toast.className = 'toast';
+        toast.style.display = 'block';
+        setTimeout(() => toast.style.display = 'none', 2000);
+    }
+    
+    formatTime(seconds) {
+        if (isNaN(seconds)) return '0:00';
+        const mins = Math.floor(seconds / 60);
+        const secs = Math.floor(seconds % 60);
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
+    }
+    
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+    
+    tryWidgetEmbed(url) {
+        this.loadWidget(url);
+        this.showToast('Using SoundCloud widget mode');
     }
 }
 
-/**
- * Initialize application
- */
-function initApp() {
-    // Load recently played
-    loadRecentlyPlayed();
-    
-    // Show welcome panel each time
-    showWelcomePanel();
-    
-    // Hide results section initially
-    resultsSection.classList.remove('active');
-    
-    // Set up event listeners
-    setupEventListeners();
-}
-
-/**
- * Sets up all event listeners
- */
-function setupEventListeners() {
-    // Welcome panel
-    welcomeCloseBtn.addEventListener('click', () => {
-        welcomePanel.classList.remove('show');
-        setTimeout(() => {
-            welcomePanel.classList.add('hidden');
-        }, 600); // Match the transition duration
-        
-        // Check if we have recently played songs
-        if (recentlyPlayed.length === 0) {
-            // If no history, show recommended songs
-            searchSongs(APP_DEFAULTS.DEFAULT_SEARCH);
-        } else {
-            // Update recently played list
-            updateRecentlyPlayed();
-        }
-    });
-    
-    // Logo link
-    logoLink.addEventListener('click', (e) => {
-        e.preventDefault();
-        
-        // Hide results section, show history section
-        resultsSection.classList.remove('active');
-        historySection.style.display = 'block';
-        
-        // If there's no history, show some recommendations
-        if (recentlyPlayed.length === 0 && currentPlaylist.length === 0) {
-            searchSongs(APP_DEFAULTS.DEFAULT_SEARCH);
-        }
-    });
-    
-    // Search
-    searchBtn.addEventListener('click', () => {
-        const query = searchInput.value.trim();
-        if (query) {
-            searchSongs(query);
-        }
-    });
-    
-    searchInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') {
-            const query = searchInput.value.trim();
-            if (query) {
-                searchSongs(query);
-            }
-        }
-    });
-    
-    // Player controls
-    minimizeBtn.addEventListener('click', () => {
-        playerFull.style.display = 'none';
-        playerMini.classList.remove('hidden');
-    });
-    
-    playerMini.addEventListener('click', function(e) {
-        if (!e.target.classList.contains('control-btn') && !e.target.closest('.control-btn')) {
-            playerFull.style.display = 'flex';
-            playerMini.classList.add('hidden');
-        }
-    });
-    
-    // Mini player controls
-    miniPlayBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        togglePlay();
-    });
-    
-    miniNextBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        playNextSong();
-    });
-    
-    // Full player controls
-    playBtnLarge.addEventListener('click', togglePlay);
-    prevBtnLarge.addEventListener('click', playPreviousSong);
-    nextBtnLarge.addEventListener('click', playNextSong);
-    shuffleBtn.addEventListener('click', toggleShuffle);
-    repeatBtn.addEventListener('click', toggleRepeat);
-    
-    // Progress bar
-    progressBarLarge.addEventListener('click', setProgress);
-    
-    // Audio player events
-    audioPlayer.addEventListener('timeupdate', updateProgressBar);
-    audioPlayer.addEventListener('ended', () => {
-        if (isRepeat) {
-            audioPlayer.currentTime = 0;
-            audioPlayer.play();
-        } else {
-            playNextSong();
-        }
-    });
-    
-    // Download button
-    downloadBtnLarge.addEventListener('click', downloadCurrentSong);
-}
-
-// Initialize app when DOM is loaded
-document.addEventListener('DOMContentLoaded', initApp);
+const player = new SoundCloudPlayer();
+window.player = player; 
